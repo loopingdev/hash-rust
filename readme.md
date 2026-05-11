@@ -1,216 +1,118 @@
-# Rust HASH256 Ethereum Mainnet Miner
+# HASH Miner — CPU + GPU hybrid
 
-* Ethereum Mainnet
-* Infura RPC
-* HASH256 mining contract
+Mines HASH token on Ethereum mainnet using **both CPU (rayon) and GPU (CUDA)**
+simultaneously. The first thread (CPU or GPU) to find a valid nonce wins;
+the result is submitted on-chain immediately.
 
-Contract:
+## Hardware this was tuned for
 
-urlHASH256 Contract on Etherscan[https://etherscan.io/address/0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc#code](https://etherscan.io/address/0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc#code)
+| Component | Spec |
+|-----------|------|
+| GPU | RTX PRO 6000 S (Blackwell, sm_100, 95.6 GB VRAM, 93.6 TFLOPS) |
+| CPU | AMD EPYC 9554 — 64 cores / 128 threads (using 32 alloc'd) |
 
-The miner:
+## Requirements
 
-* uses all CPU cores
-* multi-threaded mining
-* optimized Keccak hashing
-* auto-submits transactions
-* supports Infura RPC
+| Tool | Version |
+|------|---------|
+| Rust | 1.78+ |
+| CUDA Toolkit | 12.x (`nvcc` in PATH) |
+| `cudarc` crate | 0.9 (pinned in Cargo.toml) |
 
----
+## Project layout
 
-# 1. Recommended VPS
+```
+.
+├── Cargo.toml        ← dependencies + "gpu" feature flag
+├── build.rs          ← compiles hash_kernel.cu → PTX at build time
+├── hash_kernel.cu    ← CUDA Keccak-256 kernel
+└── src/
+    └── main.rs       ← hybrid CPU+GPU miner
+```
 
-Recommended:
+## Setup
 
 ```bash
-8 vCPU
-16GB RAM
-Ubuntu 22.04
+cp .env.example .env
+# Edit .env with your keys
 ```
 
-Better:
-
-```bash
-16–64 dedicated cores
-```
-
----
-
-# 2. Install Rust
-
-## Install dependencies
-
-```bash
-sudo apt update
-sudo apt install build-essential curl pkg-config libssl-dev -y
-```
-
----
-
-## Install Rust
-
-```bash
-curl https://sh.rustup.rs -sSf | sh
-```
-
-Choose:
-
-```text
-1. Proceed with installation
-```
-
-Reload shell:
-
-```bash
-source $HOME/.cargo/env
-```
-
-Verify:
-
-```bash
-rustc --version
-cargo --version
-```
-
----
-
-# 3. Create Project
-
-```bash
-cargo new hash-rust
-cd hash-rust
-```
-
----
-
-# 4. Replace Cargo.toml
-
-Open:
-
-```bash
-nano Cargo.toml
-```
-
-Replace with:
-
-```toml
-[package]
-name = "hash-rust"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-ethers = "2"
-tokio = { version = "1", features = ["full"] }
-hex = "0.4"
-rayon = "1.10"
-num_cpus = "1.16"
-sha3 = "0.10"
-anyhow = "1"
-serde_json = "1"
-```
-
-Save.
-
----
-
-# 5. Create .env
-
-```bash
-nano .env
-```
-
-Put:
-
+**.env**
 ```env
-PRIVATE_KEY=YOUR_PRIVATE_KEY
-INFURA_URL=https://mainnet.infura.io/v3/YOUR_INFURA_KEY
+PRIVATE_KEY=0xyour_private_key
+INFURA_URL=https://mainnet.infura.io/v3/YOUR_KEY
+
+# Optional Telegram notifications
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# CPU threads (default: num_cpus)
+THREADS=32
+
+# GPU nonces per kernel launch — tune for your GPU
+# RTX PRO 6000 S: 1<<22 (4 M) is a safe starting point
+# Increase to 1<<23 or 1<<24 if GPU utilisation < 90%
+GPU_BATCH=4194304
+
+# Set to false to disable GPU (CPU-only mode)
+USE_GPU=true
 ```
 
-IMPORTANT:
-
-Use dedicated mining wallet only.
-
-Never use your main wallet.
-
----
-
-
-# 6. Build Miner
+## Build
 
 ```bash
+# With GPU (default)
 cargo build --release
+
+# Override SM target for Blackwell RTX PRO 6000 S:
+CUDA_ARCH=sm_100 cargo build --release
+
+# CPU-only (no CUDA required)
+cargo build --release --no-default-features
 ```
 
-Compiled binary:
+## Run
 
 ```bash
-./target/release/hash-rust
+./target/release/hash-miner
 ```
 
----
+## How nonce space is partitioned
 
-# 7. Run Miner
-
-```bash
-./target/release/hash-rust
+```
+Nonce 0        → CPU thread 0
+Nonce 1        → CPU thread 1
+...
+Nonce N-1      → CPU thread N-1   (N = THREADS)
+Nonce N        → GPU batch 0      (GPU_BATCH nonces per launch)
+Nonce N+stride → GPU batch 1
+...
 ```
 
----
+`stride = THREADS + 1` so CPU and GPU never hash the same nonce.
 
-# Example Output
+## Performance expectations
 
-```text
-========================================
-HASH256 RUST ETH MAINNET MINER
-========================================
-Wallet : 0x123...
-Difficulty : 9283749823749823
-Epoch      : 8291
-Reward     : 100 HASH
-Challenge  : 0xabcd...
-Threads    : 16
-Mining started...
+| Mode | Approximate throughput |
+|------|----------------------|
+| CPU only (32 threads) | ~80–120 MH/s |
+| GPU only (RTX PRO 6000 S) | ~800–1200 MH/s |
+| **CPU + GPU combined** | **~900–1320 MH/s** |
 
-[FOUND] Nonce = 291928122
+GPU throughput scales with `GPU_BATCH`; increase it until GPU utilisation
+(check with `nvidia-smi`) stays above 95%.
 
-Submitting tx...
-TX Sent : 0xabc123...
-SUCCESS : 0xabc123...
+## Live stats output
+
+```
+[STATS] CPU 95.40 MH/s | GPU 1024.00 MH/s | Total 1119.40 MH/s | Runtime: 42s
 ```
 
----
+## Tuning tips
 
-# 8. Run In Background
-
-Install tmux:
-
-```bash
-sudo apt install tmux -y
-```
-
-Start:
-
-```bash
-tmux
-```
-
-Run miner:
-
-```bash
-./target/release/hash-rust
-```
-
-Detach:
-
-```text
-CTRL+B then D
-```
-
-Reattach:
-
-```bash
-tmux attach
-```
-
----
+1. **GPU_BATCH** — start at `4194304` (2²²). Double it until `nvidia-smi`
+   shows ~99% GPU utilisation.
+2. **THREADS** — set to your available vCPU count. On EPYC 9554 with 32
+   alloc'd cores, `32` is optimal.
+3. **CUDA_ARCH** — use `sm_100` for RTX PRO 6000 S (Blackwell).
+   `sm_89` is Ada and works but misses Blackwell-specific optimisations.
