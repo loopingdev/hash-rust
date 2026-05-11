@@ -6,8 +6,12 @@ use ethers::core::types::{Address, BlockNumber, U256};
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
+
 use rayon::prelude::*;
 use sha3::{Digest, Keccak256};
+
+use reqwest;
+use serde_json;
 
 use std::env;
 use std::str::FromStr;
@@ -35,6 +39,33 @@ const CONTRACT: &str =
 static HASH_COUNTER: AtomicU64 =
     AtomicU64::new(0);
 
+async fn telegram(
+    token: &str,
+    chat_id: &str,
+    text: &str,
+) {
+
+    if token.is_empty() || chat_id.is_empty() {
+        return;
+    }
+
+    let url = format!(
+        "https://api.telegram.org/bot{}/sendMessage",
+        token
+    );
+
+    let client = reqwest::Client::new();
+
+    let _ = client
+        .post(url)
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": text
+        }))
+        .send()
+        .await;
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
 
@@ -46,7 +77,14 @@ async fn main() -> Result<()> {
     let infura =
         env::var("INFURA_URL")?;
 
-    // Manual thread setting
+    let bot_token =
+        env::var("TELEGRAM_BOT_TOKEN")
+            .unwrap_or_default();
+
+    let chat_id =
+        env::var("TELEGRAM_CHAT_ID")
+            .unwrap_or_default();
+
     let threads: usize =
         env::var("THREADS")
             .unwrap_or("8".to_string())
@@ -85,6 +123,16 @@ async fn main() -> Result<()> {
 
     println!("Wallet  : {:?}", address);
     println!("Threads : {}", threads);
+
+    telegram(
+        &bot_token,
+        &chat_id,
+        &format!(
+            "🚀 HASH miner started\nWallet: {:?}\nThreads: {}",
+            address,
+            threads
+        )
+    ).await;
 
     loop {
 
@@ -182,7 +230,7 @@ async fn main() -> Result<()> {
         });
 
         // =====================================
-        // MINING WORKERS
+        // MINING THREADS
         // =====================================
 
         (0..threads)
@@ -300,25 +348,21 @@ async fn main() -> Result<()> {
                 )
             );
 
-        // adaptive priority fee
         let priority_fee =
             if base_fee <
                 U256::from(
                     1_000_000_000u64
                 )
             {
-                // 0.1 gwei
                 U256::from(
                     100_000_000u64
                 )
             } else {
-                // 2 gwei
                 U256::from(
                     2_000_000_000u64
                 )
             };
 
-        // adaptive gas price
         let gas_price =
             (base_fee
                 * U256::from(120u64)
@@ -376,6 +420,17 @@ async fn main() -> Result<()> {
                     "SUCCESS : {:?}",
                     receipt.transaction_hash
                 );
+
+                telegram(
+                    &bot_token,
+                    &chat_id,
+                    &format!(
+                        "✅ HASH mined\n\nTX: {:?}\nNonce: {}\nGas: {:.8} ETH",
+                        receipt.transaction_hash,
+                        nonce,
+                        estimated_cost.as_u128() as f64 / 1e18
+                    )
+                ).await;
             }
 
             None => {
@@ -383,6 +438,12 @@ async fn main() -> Result<()> {
                 println!(
                     "TX dropped"
                 );
+
+                telegram(
+                    &bot_token,
+                    &chat_id,
+                    "⚠️ TX dropped"
+                ).await;
             }
         }
 
